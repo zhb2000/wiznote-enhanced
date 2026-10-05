@@ -1,0 +1,124 @@
+/*
+ * 注入到宿主页面的**全局**样式。
+ *
+ * 注意：这只保留必须落在宿主文档（light DOM）里的东西 ——
+ * 目前只有注入进宿主右键菜单的菜单项。
+ * 面板（导出对话框）与 toast 都在 Shadow DOM 里，样式见 `ui/panel/panel.css`。
+ *
+ * 这里定义的 CSS 变量会被 Shadow DOM 继承（自定义属性可跨 shadow 边界），
+ * 所以暗色模式的调色板只需维护这一份。
+ */
+
+:root {
+  --wze-surface: #ffffff;
+  --wze-text: #1f2329;
+  --wze-text-weak: #6b7280;
+  --wze-border: #e5e7eb;
+  --wze-primary: #2563eb;
+  --wze-primary-text: #ffffff;
+  --wze-hover: rgba(0, 0, 0, 0.05);
+  --wze-mask: rgba(0, 0, 0, 0.45);
+  --wze-danger: #dc2626;
+  /* 危险按钮 hover：往深走。提亮会变成偏粉的浅红，看起来像"警示被冲淡了" */
+  --wze-danger-hover: #b91c1c;
+  --wze-success: #16a34a;
+  --wze-warn: #b45309;
+
+  /*
+   * ---------- 动效 token ----------
+   *
+   * 时长与曲线的**唯一来源**。两个消费方都从这里取：
+   *   - `panel.css` 里的 CSS `transition` 直接 `var()`；
+   *   - `kit/morph.ts` 的 WAAPI 补间在首次用时读一次（`motionMs()` / `motionEase()`）。
+   * 所以调手感只改这一处 —— 从前 JS 里一套常量、CSS 里另一套，改一处必漏一处
+   * （折叠箭头那条甚至专门写了注释说“两边要一起改”）。
+   *
+   * 名字按**用途**取，不按大小：同一个数值放在两个用途上早晚会分岔。
+   */
+  --wze-ease: cubic-bezier(0.2, 0, 0, 1);
+  /** 底色 / 颜色这类微反馈（hover、按下） */
+  --wze-dur-fast: 150ms;
+  /** 高度露出 / 收起（`setRevealed()`）：动的是小内容，比变形补间短一档；折叠箭头跟着它转 */
+  --wze-dur-reveal: 160ms;
+  /** 变形补间与淡入淡出（`morphIn/morphOut/fadeIn/fadeOut`）、进度条宽度 */
+  --wze-dur-normal: 200ms;
+  /** 双击把手飞回默认位置：那一下常常跨半个屏幕，比变形补间长一点才跟得上 */
+  --wze-dur-fly: 280ms;
+  /**
+   * 无限循环的一条：目前只有扫描期的不确定进度条用（`panel.css` 的 `-indeterminate`）。
+   * 它不表示“一次变化用了多久”，而是“走一个来回要多久” —— 比补间慢得多才不显得慌。
+   * 循环动画也不用 `--wze-ease`（那条曲线是给“出发并落定”用的，见 panel.css 里的说明）。
+   */
+  --wze-dur-loop: 1150ms;
+}
+
+/*
+ * `prefers-reduced-motion` 在 **token 层**归零，而不是各处各写一遍 ——
+ * 从前只有折叠箭头那条 CSS 与 JS 里的三个常量管这件事，进度条宽度、hover 底色、
+ * toast 淡出都不管。归零比 `transition: none` 更省事：JS 那边读到的就是 0，
+ * `morph.ts` 里那些 `=== 0 就瞬时落定` 的短路判断继续有效，不用再单独问一次媒体查询。
+ *
+ * 判定因此是**加载时快照**：会话中途改系统设置，CSS 侧会立刻跟上（媒体查询），
+ * JS 侧要等下次刷新才跟上（那三个时长只在首次用时读一次）。这个不对齐是可接受的：
+ * 只会让补间多跑或少跑两百毫秒，不影响任何状态。
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --wze-dur-fast: 0ms;
+    --wze-dur-reveal: 0ms;
+    --wze-dur-normal: 0ms;
+    --wze-dur-fly: 0ms;
+    --wze-dur-loop: 0ms;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wze-surface: #23262b;
+    --wze-text: #e8eaed;
+    --wze-text-weak: #9aa0a6;
+    --wze-border: #3a3f46;
+    --wze-primary: #4c8dff;
+    --wze-hover: rgba(255, 255, 255, 0.08);
+    /* 暗色下反过来：往亮走才看得出反馈（深红压在深底上几乎没变化） */
+    --wze-danger-hover: #ef4444;
+  }
+}
+
+/* ---------- 右键菜单里注入的菜单项 ---------- */
+
+/*
+ * 这里是**兜底**样式，正常情况下不该生效。
+ *
+ * 菜单项的外观（内外边距 / 圆角 / 字体 / hover 底色）由应用自己的 `.MuiMenuItem-root`
+ * 那套 class 决定，我们在 `features/export-menu.ts` 里把同一套 class 挂到了注入的 li 上。
+ * 所以下面这些规则一律用 `:where()` 把特异性压到 **0** —— 只要应用有对应规则就一定赢，
+ * 不会出现“两套值打架、谁赢看样式表注入顺序”的情况；只有那套 class 失效时它们才兜底。
+ *
+ * 数值抄自应用实测值（2026-10-04）：
+ * `padding: 6px 16px; margin: 0 8px; border-radius: 6px; line-height: 21px; height: 33px`。
+ * 注意那个 `margin: 0 8px` —— 少了它，左边距就比邻居少 8px。
+ */
+:where(#context-menu-note-list .wze-menu-item) {
+  box-sizing: border-box;
+  padding: 6px 16px;
+  margin: 0 8px;
+  min-height: 33px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 21px;
+}
+
+:where(.wze-menu-item) {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+:where(.wze-menu-item:hover) {
+  background: var(--wze-hover);
+}
+
+:where(.wze-menu-item .menu-text) {
+  color: inherit;
+}

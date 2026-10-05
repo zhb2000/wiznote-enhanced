@@ -1,0 +1,28 @@
+{
+  "name": "wiznote-enhanced",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:chrome": "node scripts/dev-chrome.mjs",
+    "dev:chrome:dry": "node scripts/dev-chrome.mjs --dry-run",
+    "build": "npm run typecheck && vite build",
+    "build:watch": "vite build --watch",
+    "serve:dist": "node scripts/serve-dist.mjs",
+    "check:frontmatter": "node scripts/check-front-matter.mjs",
+    "check:markdown": "node scripts/check-markdown.mjs",
+    "check:naming": "node scripts/check-naming.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vite-plugin-monkey": "^8.1.1"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "js-yaml": "^5.4.2"
+  },
+  "license": "BSD-3-Clause"
+}

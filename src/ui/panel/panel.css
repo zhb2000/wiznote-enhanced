@@ -1,0 +1,1110 @@
+/*
+ * 面板样式（Shadow DOM 内部）：导出对话框 + 页面内提示。
+ *
+ * 变量（--wze-*）定义在 style.css 的 :root 上，靠自定义属性继承进入 shadow，
+ * 因此暗色模式只维护那一份。这里所有选择器都不需要再带 wze 前缀防污染，
+ * 但仍沿用前缀，方便和宿主页面里的调试代码区分。
+ */
+
+:host {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483600;
+  /* 宿主铺满视口但不拦截点击，只有真正可交互的子元素才打开 pointer-events */
+  pointer-events: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--wze-text);
+  text-align: left;
+  -webkit-font-smoothing: antialiased;
+}
+
+:host *,
+:host *::before,
+:host *::after {
+  box-sizing: border-box;
+}
+
+/*
+ * `hidden` 必须真的不显示。
+ *
+ * UA 样式的 `[hidden] { display: none }` 会被**作者样式里的 display** 盖掉 ——
+ * 实测踩过一次：确认条写了 `display: flex`，于是 `el.hidden = true` 之后它照样
+ * 占着 49px 高、还进了无障碍树。shadow 里只有我们自己的元素，这里统一兜住。
+ */
+[hidden] {
+  display: none !important;
+}
+
+/* ==================== 模态壳（导出 / 设置共用） ==================== */
+
+/*
+ * 外框与关闭规则由 `ui/kit/modal.ts` 统一创建，两个对话框只差尺寸：
+ * 默认是“设置”这种窄面板，导出对话框用 `.wze-export-dialog` 放宽到 880px。
+ */
+
+.wze-modal-mask {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: var(--wze-mask);
+  pointer-events: auto;
+}
+
+.wze-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  /* 高度按内容自适应，超过上限就靠内容区内部滚动 */
+  max-height: min(720px, calc(100vh - 64px));
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--wze-surface);
+  color: var(--wze-text);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+}
+
+/* 导出对话框：左右两栏，需要更宽 */
+.wze-export-dialog {
+  width: min(880px, 100%);
+}
+
+/*
+ * 打开时焦点落在**容器自己**身上（`kit/modal.ts`，容器带 `tabindex="-1"`）：读屏才会
+ * 先把“这是什么对话框、叫什么名字”（`role="dialog"` + `aria-labelledby`）念出来，
+ * 而不是直接念第一个按钮。它不是控件，不该画焦点圈 —— 键盘用户要的那圈在里面的控件上。
+ */
+.wze-modal:focus {
+  outline: none;
+}
+
+/* ---------- 头部 ---------- */
+
+.wze-modal-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--wze-border);
+}
+
+.wze-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.wze-modal-close {
+  /* 固定成方形点击区 + hover 底色，让它一眼看出是可点的按钮而不是一个装饰性符号 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0 0 2px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--wze-text-weak);
+  font-size: 20px;
+  line-height: 1;
+  transition: background-color var(--wze-dur-fast) var(--wze-ease), color var(--wze-dur-fast) var(--wze-ease);
+}
+
+.wze-modal-close:hover {
+  background: var(--wze-hover);
+  color: var(--wze-text);
+}
+
+.wze-modal-close:active {
+  background: var(--wze-border);
+}
+
+.wze-modal-close:focus-visible {
+  outline: 2px solid var(--wze-primary);
+  outline-offset: 1px;
+}
+
+/* ---------- 头部横幅（通知） ---------- */
+
+/*
+ * 与确认行同样分两层（见 `ui/kit/modal.ts` 的 `setBanner()`）：
+ *
+ * - 外层 `.wze-modal-banner`：只负责被补间的高度，所以**自己没有 padding / margin、也不裁剪**
+ *   —— `box-sizing: border-box` 下 `height` 压不过 padding，带上就会在“只剩 padding 的厚度”
+ *   上停一拍再啪一下消失。裁剪交给 `setRevealed()` 在补间期间临时加，落定后要还回来，
+ *   否则里面那个按钮（“立即刷新”）的焦点圈会被常驻的 `overflow: hidden` 切掉一条边；
+ * - 内层 `.wze-modal-banner-inner`：外观、间距、排版全在这儿，也是调用方拿到的 `modal.banner`。
+ */
+.wze-modal-banner {
+  flex: none;
+}
+
+.wze-modal-banner-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--wze-border);
+  background: var(--wze-hover);
+  color: var(--wze-text);
+  font-size: 12px;
+}
+
+.wze-modal-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wze-modal-banner .wze-btn {
+  flex: none;
+  min-width: 0;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* ---------- 待决确认行（底部，紧贴按钮行） ---------- */
+
+/*
+ * 顶部横幅放通知，这条放决策：点的是底部那个按钮，反馈就必须出现在那个按钮上方，
+ * 不能跑到屏幕另一头去。
+ *
+ * 插槽自己不带外观，也**不要求调用方维护 hidden** —— 里面出现可见内容时它才铺开；
+ * 否则“确认行自己开合 + 插槽另存一份状态”迟早漏一处。
+ * `:has()` 不可用的浏览器只是少那条分隔线与底色，功能不受影响。
+ *
+ * ⚠️ 这里**没有 padding**：那 10px / 20px 挪进了 `.wze-confirm-inner`。插槽的 padding
+ * 是补不了的（补间动的是确认行自己的高度），留在这一层的话，确认行露头时插槽会先“啪”
+ * 地长出一圈空白。挪进内层之后，插槽只剩那条线与底色 —— 它的高度完全由确认行决定，
+ * 于是整块是**跟着确认行一起长出来**的。
+ */
+.wze-modal-notice:has(> :not([hidden])) {
+  flex: none;
+  border-top: 1px solid var(--wze-border);
+  background: var(--wze-hover);
+}
+
+/* 说明与按钮是同一个决策块，中间不留线：把按钮行那条分隔线让出来当上边界 */
+.wze-modal-notice:has(> :not([hidden])) + .wze-modal-foot {
+  border-top: none;
+}
+
+.wze-modal-notice .wze-confirm-inner {
+  padding: 10px 20px;
+}
+
+.wze-modal-notice .wze-btn {
+  flex: none;
+  min-width: 0;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/*
+ * 确认行（`ui/kit/confirm.ts`）分两层：
+ *
+ * - 外层 `.wze-confirm`：只负责被补间的高度（`kit/morph.ts` 的 `setRevealed()`），
+ *   所以它**自己没有 padding、也没有 margin** —— `box-sizing: border-box` 下 `height`
+ *   压不过 padding，带上就会在“只剩 padding 的厚度”上停一拍再啪一下消失；
+ * - 内层 `.wze-confirm-inner`：间距、内边距、排版全在这儿（模态里 10/20 是插槽让出来的，
+ *   悬浮条里是上面那 8px 的空档）。
+ *
+ * 收起靠 `hidden`：外层没有作者 `display`，`[hidden]` 本身就能生效；文件顶部那条
+ * `[hidden] { display: none !important }` 是给别的带 `display: flex` 的元素兜底的。
+ */
+.wze-confirm-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--wze-text);
+  font-size: 12px;
+}
+
+.wze-confirm-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wze-confirm-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+
+/* ---------- 主体插槽（内容自己排版，插槽只负责占满剩余高度） ---------- */
+
+.wze-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 主体：左列表 / 右选项 ---------- */
+
+.wze-export-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.wze-export-pane-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--wze-border);
+}
+
+.wze-export-side {
+  /* 选项标题 + 说明都是整句中文，太窄会来回折行 */
+  flex: 0 0 340px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 18px;
+  overflow-y: auto;
+}
+
+/* ---------- 列表 ---------- */
+
+.wze-export-tabs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--wze-border);
+}
+
+.wze-export-tab {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px 6px 0 0;
+  background: none;
+  color: var(--wze-text-weak);
+  font-size: 12px;
+}
+
+.wze-export-tab:hover {
+  background: var(--wze-hover);
+  color: var(--wze-text);
+}
+
+.wze-export-tab-active {
+  color: var(--wze-text);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--wze-primary);
+}
+
+.wze-export-list-scroll {
+  flex: 1 1 auto;
+  min-height: 96px;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+
+.wze-export-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wze-export-row + .wze-export-row {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--wze-border);
+}
+
+.wze-export-row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wze-export-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.wze-export-row-out {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--wze-text-weak);
+}
+
+.wze-export-row-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--wze-text-weak);
+}
+
+.wze-export-row-sep {
+  opacity: 0.6;
+}
+
+.wze-export-row-progress {
+  color: var(--wze-primary);
+}
+
+.wze-export-row-state-pending,
+.wze-export-row-state-fallback-html {
+  color: var(--wze-text-weak);
+}
+
+.wze-export-row-state-local,
+.wze-export-row-state-ok {
+  color: var(--wze-success);
+}
+
+.wze-export-row-state-remote,
+.wze-export-row-state-skipped {
+  color: var(--wze-warn);
+}
+
+.wze-export-row-state-running {
+  color: var(--wze-primary);
+}
+
+.wze-export-row-state-failed {
+  color: var(--wze-danger);
+}
+
+.wze-export-row-problems {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+  color: var(--wze-warn);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* ---------- 右栏：摘要 + 选项 ---------- */
+
+.wze-export-summary {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.wze-export-sub {
+  color: var(--wze-text-weak);
+  font-size: 12px;
+}
+
+.wze-export-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--wze-border);
+  color: var(--wze-text-weak);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/*
+ * 整行都可点（点文字也切换勾选）：可点的可供性交给 hover 底色承担，光标保持默认箭头。
+ * 左右各留 8px 内边距 + 负外边距 —— 底色不贴着文字，同时与旁边正文的左边缘对齐。
+ */
+.wze-export-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.wze-export-option:hover:not(.wze-export-option-disabled) {
+  background: var(--wze-hover);
+}
+
+.wze-export-option input {
+  flex: none;
+  margin: 2px 0 0;
+}
+
+/* 标题 + 说明竖排：说明另起一行，不与标题抢宽度 */
+.wze-export-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.wze-export-option-hint {
+  color: var(--wze-text-weak);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* 元数据形态 / 原始字段：从属于上面那一项，缩进一级 */
+.wze-export-option-nested {
+  margin-left: 14px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.wze-export-option-disabled {
+  opacity: 0.45;
+}
+
+.wze-export-option select {
+  align-self: center;
+  margin-left: auto;
+  padding: 3px 6px;
+  border: 1px solid var(--wze-border);
+  border-radius: 6px;
+  background: var(--wze-surface);
+  color: inherit;
+  font-size: 12px;
+}
+
+/* ---------- 底部：进度 + 操作 ---------- */
+
+.wze-modal-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--wze-border);
+}
+
+.wze-export-progress {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wze-export-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--wze-hover);
+  overflow: hidden;
+}
+
+.wze-export-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--wze-primary);
+  transition: width var(--wze-dur-normal) var(--wze-ease);
+}
+
+/*
+ * 不确定进度（扫描期）：那一阶段没有可报的百分比（预检的篇数在右栏摘要里，见
+ * `ui/export-dialog.ts` 的 `summarize()`），让一条窄条**来回走**代替一条永远不动的空槽
+ * —— 空槽跟“卡住了”长得一模一样，而预检恰恰是最像“没反应”的那一段。
+ *
+ * ⚠️ 宽度由这里给（调用方会把内联宽度撤掉）：内联样式盖得过这条规则。
+ *
+ * ⚠️ 曲线是整套动效里**唯一**不用 `--wze-ease` 的地方。那条是减速曲线，套到无限循环上每
+ * 一轮都会在右边停一拍再跳回左边；这里要的是一去一回的对称手感，所以单独用一条 ease-in-out。
+ */
+.wze-export-bar-indeterminate > i {
+  width: 34%;
+  animation: wze-bar-indeterminate var(--wze-dur-loop) cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes wze-bar-indeterminate {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(395%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * 整个循环去掉（`--wze-dur-loop` 虽然被归零，但 0ms + `infinite` 会停在最后一帧 = 条子
+   * 跑出屏幕外，看着就是“空的”），换成一条**静止的浅色满条**：不晃，但一眼能看出不是 100%。
+   */
+  .wze-export-bar-indeterminate > i {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
+}
+
+.wze-export-progress-text {
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--wze-text-weak);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wze-export-actions {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* ---------- 按钮 ---------- */
+
+.wze-btn {
+  min-width: 84px;
+  height: 32px;
+  padding: 0 16px;
+  border: 1px solid var(--wze-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--wze-text);
+  font-size: 13px;
+}
+
+/*
+ * 悬停底色就是全站唯一的“可点”可供性（见 docs/export-pipeline.md §1.6），所以**不可用的
+ * 按钮必须把它交出去** —— 否则它看起来还能点，点了却什么都不发生。
+ *
+ * `.wze-btn[aria-disabled='true']` 是“待决确认行亮着时的触发按钮”（`ui/kit/confirm.ts`）：
+ * 那个动作被挂起了，得先在行里选一个。它与原生 `:disabled` 共用同一套外观 —— 全站只有
+ * 一种“不可用”的样子，别为它另发明一种。
+ *
+ * 这里**不用 `pointer-events: none`、也不用真的 `disabled`**：`aria-disabled` 的元素仍然
+ * 可聚焦、仍然收得到 hover（tooltip 上那句后果说明不能丢），收起时焦点也还要还回它身上。
+ */
+.wze-btn:disabled,
+.wze-btn[aria-disabled='true'] {
+  opacity: 0.55;
+}
+
+.wze-btn:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--wze-hover);
+}
+
+.wze-btn-primary {
+  border-color: transparent;
+  background: var(--wze-primary);
+  color: var(--wze-primary-text);
+}
+
+.wze-btn-primary:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--wze-primary);
+  filter: brightness(1.08);
+}
+
+.wze-btn-danger {
+  border-color: transparent;
+  background: var(--wze-danger);
+  color: #fff;
+}
+
+/*
+ * ⚠️ 这里**必须重新声明 background**。
+ *
+ * 通用的 `.wze-btn:hover:not(:disabled):not([aria-disabled='true'])` 特异性比
+ * `.wze-btn-danger` 的 (0,1,0) 高 —— 只写 `filter` 的话，hover 时红底会被它改成
+ * `--wze-hover` 的浅灰，于是变成“浅灰底 + 白字”，字几乎看不见（实测就是这个原因）。
+ *
+ * 顺带不再用 `filter: brightness()`：提亮红色会得到偏粉的浅红，还会连白字一起提亮。
+ * 直接用更深一档的红（暗色模式下反过来取更亮的）。
+ */
+.wze-btn-danger:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--wze-danger-hover);
+}
+
+/* ---------- 窄屏：两栏退化为一栏 ---------- */
+
+@media (max-width: 720px) {
+  .wze-modal-mask {
+    padding: 16px;
+  }
+
+  .wze-export-main {
+    flex-direction: column;
+  }
+
+  /* 纵向布局里列表在上：给足高度，上限跟着视口走，
+     矮屏上自动收窄，不会把下面的选项区挤没 */
+  .wze-export-pane-list {
+    flex: 0 0 auto;
+    min-height: 140px;
+    max-height: min(45vh, 320px);
+    border-right: 0;
+    border-bottom: 1px solid var(--wze-border);
+  }
+
+  .wze-export-side {
+    flex: 1 1 auto;
+    min-height: 180px;
+  }
+}
+
+/* ==================== 设置对话框 ==================== */
+
+.wze-settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0 10px;
+}
+
+.wze-settings-section {
+  margin: 14px 20px 4px;
+  color: var(--wze-text-weak);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.wze-settings-section:first-child {
+  margin-top: 10px;
+}
+
+.wze-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 20px;
+}
+
+.wze-settings-row:hover {
+  background: var(--wze-hover);
+}
+
+/* 只读行（诊断）不响应 hover */
+.wze-settings-row-static:hover {
+  background: none;
+}
+
+.wze-settings-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wze-settings-label {
+  color: var(--wze-text);
+  font-size: 13px;
+}
+
+.wze-settings-hint {
+  color: var(--wze-text-weak);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.wze-settings-value {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--wze-text-weak);
+  font-size: 12px;
+  text-align: right;
+  word-break: break-all;
+}
+
+.wze-settings-link {
+  min-width: 0;
+  color: var(--wze-primary);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.wze-settings-link:hover {
+  text-decoration: underline;
+}
+
+/*
+ * 外链角标：跟链接同色（继承 currentColor）、比正文小一档，贴在地址末尾。
+ * 它是 <a> 的子元素，所以跟着链接一起可点、一起出下划线。
+ *
+ * ⚠️ 这里**不能加 margin-left**：下划线不覆盖 margin，会在文字与角标之间断开。
+ * 间距由 `addLink` 往 <a> 里塞的一个空格承担（空格本身会被下划线覆盖）。
+ */
+.wze-settings-link-icon {
+  font-size: 11px;
+}
+
+.wze-settings-row input[type='checkbox'] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--wze-primary);
+}
+
+/* 底部：[重置] 在左，[关闭] 在右 */
+.wze-settings-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+/* ==================== 页面内提示 ==================== */
+
+.wze-toast-host {
+  position: fixed;
+  left: 50%;
+  bottom: 48px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.wze-toast {
+  max-width: 70vw;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: rgba(28, 30, 34, 0.94);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  transition: opacity var(--wze-dur-normal) var(--wze-ease);
+}
+
+.wze-toast-error {
+  background: rgba(178, 34, 34, 0.95);
+}
+
+.wze-toast-out {
+  opacity: 0;
+}
+
+/* ==================== 导出任务悬浮条（最小化形态） ==================== */
+
+/*
+ * 默认在右下角（toast 在底部居中，两者不抢位置），可以拖动改位置。
+ *
+ * 层级高于模态遮罩（设置对话框开着时它不被压暗、照样能点）；但**导出对话框开着时它整个藏起来**
+ * —— 那种情况下它就在对话框旁边晃，纯属抢注意力（见下面 `:host(.wze-dialog-open)` 那条）。
+ *
+ * 宿主 `:host` 默认 pointer-events: none，所以这里必须显式打开，否则整条都不可点。
+ *
+ * 这一层**自己不裁剪**（没有 overflow，也没有阴影）：阴影全部交给下面的 `.wze-task-shell`。
+ * 原因见 `ui/export-tasks.ts` 顶部那段注释 —— 任务列表要滚动，而滚动容器的 overflow 会在
+ * 自己的 padding box 处把子元素的阴影切出一条直边，看起来就像“阴影被外框矩形裁掉了”。
+ */
+.wze-taskbar {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 20;
+  width: min(320px, calc(100vw - 32px));
+  pointer-events: auto;
+  user-select: none;
+}
+
+.wze-taskbar-dragging {
+  cursor: grabbing;
+}
+
+/*
+ * 导出对话框开着时不显示悬浮条。class 由 `ui/panel/host.ts` 的 `setExportDialogOpen()`
+ * 挂在**遮罩宿主**的 DOM 上，宿主在 shadow 外面，普通后代选择器够不着它，所以这里用 `:host(...)`。
+ *
+ * 只是**藏起来**：任务照跑，位置、展开状态、确认行都留在原地，对话框一关就回到原处。
+ * 代价是那段时间够不着别的任务 —— 想换一个看，先在对话框里点 − 收起来（或直接关掉它）。
+ *
+ * ⚠️ 用的是 `visibility: hidden`，**不是 `display: none`** —— 藏起来的东西仍然要占着盒子：
+ * 对话框那一下“收过去”的落点就是悬浮条的盒子，而悬浮条常常是**在对话框还开着的时候**才被
+ * 建出来的（第一次把任务收进去），用 `display: none` 的话那一刻谁也量不出它落在哪儿，
+ * 收起动画就只能原地缩一下（实测踩过：合并版悬浮条有方向、单任务版没有，就是这个原因）。
+ *
+ * 不占地方的那半边由 `pointer-events: none` 兜住：藏起来的东西不该被点到（`visibility`
+ * 本身就不参与命中测试，这里写死更省心）。它也不进无障碍树、不可聚焦。
+ */
+:host(.wze-dialog-open) .wze-taskbar {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/*
+ * 外框。`overflow: hidden` 只用来把内部内容（含把手条、列表）裁进圆角，
+ * **裁不到自己的阴影** —— 阴影就是挂在这一层上的，见上面 `.wze-taskbar` 的说明。
+ */
+.wze-task-shell {
+  overflow: hidden;
+  border: 1px solid var(--wze-border);
+  border-radius: 12px;
+  background: var(--wze-surface);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+}
+
+/* ---------- 顶部把手条：整张卡片唯一的拖拽面（两种形态都在） ---------- */
+
+.wze-task-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  /* 只有这里用 grab / grabbing —— 平台对“可拖动区域”的标准光标；其余控件保持箭头 */
+  cursor: grab;
+}
+
+/*
+ * 居中的把手：卡片“可以拖”的唯一视觉暗示（抽屉把手那套约定）。
+ * 静止时用边框色（几乎无痕），悬停把手条时加深 —— 只在“正准备动它”的那一刻给提示，
+ * 平时不跟“可点的行”抢注意力。
+ */
+.wze-task-grip {
+  width: 28px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--wze-border);
+  transition: background-color var(--wze-dur-fast) var(--wze-ease);
+}
+
+.wze-task-titlebar:hover .wze-task-grip,
+.wze-taskbar-dragging .wze-task-grip {
+  background: var(--wze-text-weak);
+}
+
+/* ---------- 多任务时的分组行（整行可点：折叠 / 展开） ---------- */
+
+.wze-task-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--wze-border);
+  font-size: 12px;
+}
+
+.wze-task-group:hover {
+  background: var(--wze-hover);
+}
+
+.wze-task-group:focus-visible {
+  outline: 2px solid var(--wze-primary);
+  outline-offset: -2px;
+}
+
+.wze-task-group-text {
+  flex: none;
+  font-weight: 600;
+}
+
+.wze-task-group-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--wze-text-weak);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 箭头是自绘 SVG（见 export-tasks.ts 的 chevronIcon）。画的是**朝上**的箭头：
+ * 悬浮条贴着屏幕下沿，展开是往上长，所以收起时朝上（点它往上展开）、展开后转 180° 朝下。
+ *
+ * 时长与 easing 走 `--wze-dur-reveal` / `--wze-ease`，也就是 `kit/morph.ts` 的
+ * `setRevealed()` 用的那一对 —— 高度和箭头一起动才像同一件事。这两种机制（CSS transition
+ * 与 WAAPI）共用同一份 token，所以不可能再各自漂移。
+ */
+.wze-task-chevron {
+  flex: none;
+  display: inline-flex;
+  color: var(--wze-text-weak);
+  transition: transform var(--wze-dur-reveal) var(--wze-ease),
+    color var(--wze-dur-reveal) var(--wze-ease);
+}
+
+/* 悬停整行时箭头跟着加深：让“这一行是开关”这件事在鼠标移上去的一刻就说清楚 */
+.wze-task-group:hover .wze-task-chevron {
+  color: var(--wze-text);
+}
+
+.wze-task-chevron-expanded {
+  transform: rotate(180deg);
+}
+
+/* 系统要求减少动态效果时，箭头直接跳 —— `--wze-dur-*` 在 `style.css` 里被归零，不用在这里再写一份 */
+
+/* ---------- 折叠时的汇总行 ---------- */
+
+/*
+ * 外层只负责“被补间的高度”，不带 padding：`box-sizing: border-box` 下 height 压不过
+ * padding，padding 留在外层会让收起动画停在“只剩 padding”的厚度上。
+ * padding 与内容都在内层，外层再加 overflow: hidden 把动画途中的溢出裁掉
+ * （任务列表靠自己的 `overflow-y: auto` 裁，不用另外加）。
+ */
+.wze-task-summary {
+  overflow: hidden;
+}
+
+.wze-task-summary-inner {
+  padding: 10px 12px;
+}
+
+/* 点它同样能展开（可点的可供性靠 hover 底色） */
+.wze-task-summary:hover {
+  background: var(--wze-hover);
+}
+
+.wze-task-summary-text {
+  display: block;
+  overflow: hidden;
+  color: var(--wze-text-weak);
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 任务行（展开后，或只有一个任务时） ---------- */
+
+.wze-task-list {
+  display: flex;
+  flex-direction: column;
+  /* 任务多的时候在这里滚；行是扁平的（没有阴影），所以裁不到任何东西 */
+  max-height: min(50vh, 420px);
+  overflow-y: auto;
+}
+
+.wze-task {
+  padding: 10px 12px;
+}
+
+/* 整行可点（点它把对话框叫回来）：可点的可供性靠 hover 底色，不用手型光标 */
+.wze-task:hover {
+  background: var(--wze-hover);
+}
+
+/*
+ * 两条“整行可点”的行（任务行 = 打开对话框，汇总行 = 展开任务列表）的**键盘焦点圈**。
+ *
+ * hover 底色只服务鼠标，键盘得有等价物：`export-tasks.ts` 给这两行挂了 `tabindex="0"`
+ * 与 Enter / Space 的处理，这里补上“当前焦点在哪一行”的视觉。`outline-offset: -2px`
+ * 让圈画在行内 —— 行是贴着卡片边的，画在外面会被 `.wze-task-shell` 的圆角裁掉。
+ */
+.wze-task:focus-visible,
+.wze-task-summary:focus-visible {
+  outline: 2px solid var(--wze-primary);
+  outline-offset: -2px;
+}
+
+.wze-task-list > .wze-task + .wze-task {
+  border-top: 1px solid var(--wze-border);
+}
+
+.wze-task-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wze-task-state {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.wze-task-state-running {
+  color: var(--wze-primary);
+}
+
+.wze-task-state-queued {
+  color: var(--wze-text-weak);
+}
+
+.wze-task-state-ok {
+  color: var(--wze-success);
+}
+
+.wze-task-state-warn {
+  color: var(--wze-warn);
+}
+
+.wze-task-text {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--wze-text-weak);
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wze-task-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/*
+ * 悬浮条上的按钮比通用按钮小一号。特异性写到 (0,2,0)：
+ * 和 `.wze-btn` 同为 (0,1,0) 时谁赢就看样式表顺序了，不能赌。
+ */
+.wze-taskbar .wze-task-btn {
+  min-width: 0;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/*
+ * 卡片里没有横条可铺：确认行退化成“一行说明 + 右侧两个按钮”，跟在进度条后面。
+ * 复用 `ui/kit/confirm.ts`，所以形态差异全部落在样式上，行为（焦点 / Esc / 文案）完全一致。
+ *
+ * ⚠️ 与上面那 8px 空档一样，落在**内层**：确认行是“点关闭”之后才长出来的，那 8px 要是留
+ * 在外层（`margin-top`），补间够不着它 —— 卡片会先猛地长高 8px，再慢慢长剩下的。
+ */
+.wze-task .wze-confirm-inner {
+  display: block;
+  padding-top: 8px;
+}
+
+.wze-task .wze-confirm-text {
+  color: var(--wze-text-weak);
+}
+
+.wze-task .wze-confirm-actions {
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.wze-taskbar .wze-confirm .wze-btn {
+  min-width: 0;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* ---------- 进度条（任务行与折叠汇总共用） ---------- */
+
+.wze-task-progress,
+.wze-task-aggbar {
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 2px;
+  background: var(--wze-hover);
+  overflow: hidden;
+}
+
+.wze-task-progress > i,
+.wze-task-aggbar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--wze-primary);
+  transition: width var(--wze-dur-normal) var(--wze-ease);
+}

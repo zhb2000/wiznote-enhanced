@@ -1,0 +1,17 @@
+*.local
+*.local/
+*.local.*
+
+node_modules
+dist
+dist-ssr
+.DS_Store
+
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

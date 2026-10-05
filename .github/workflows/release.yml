@@ -1,0 +1,63 @@
+name: Prepare Release
+
+# 目标：在你写 changelog、手点“Publish release”之前，构建产物就已经挂在这个 release 上了。
+# 这样点发布的那一瞬间 releases/latest/download/... 就指向新资产，**没有空窗期**。
+#
+# 流程：push tag（vX.Y.Z）→ 本工作流构建并创建/更新 **draft release**、挂上两个资产
+#       → 你打开该 draft 写 changelog → 点 Publish release。
+# draft 及其资产对匿名用户不可见，所以发布前用户端仍然只看到上一个正式版本。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # @version 必须真的变大，否则所有人都不会被提示更新 —— 要求 tag 与 package.json
+      # 的 version 一致，不一致直接失败（此时还没建 draft，不会留下半成品）。
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 的 version ${version} 不一致"
+            exit 1
+          fi
+
+      - run: npm run build
+
+      # 资产名写死在 vite.config.ts 的 @updateURL/@downloadURL 里，必须是这两个名字。
+      # 已存在且仍是 draft：只覆盖资产，不动你写的 changelog；已正式发布：拒绝改动。
+      - name: 创建 / 更新 draft release 并挂上资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          assets="dist/wiznote-enhanced.user.js dist/wiznote-enhanced.meta.js"
+          if is_draft="$(gh release view "$tag" --json isDraft -q .isDraft 2>/dev/null)"; then
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::release ${tag} 已经正式发布，拒绝覆盖其资产；要重发请先删除该 release"
+              exit 1
+            fi
+            gh release upload "$tag" $assets --clobber
+          else
+            gh release create "$tag" $assets \
+              --draft \
+              --verify-tag \
+              --title "$tag" \
+              --notes "本草案由 CI 创建，资产已就绪。请补充 changelog 后再点 Publish release。"
+          fi
