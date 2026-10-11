@@ -17,9 +17,13 @@ jobs:
   prepare-draft:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # v7 起这两个 action 都跑在 node24 运行时上（runner >= 2.327.1，GitHub 托管 runner 远超这条线），
+      # 不会再触发 “Node.js 20 is deprecated” 的强行升级警告。
+      # setup-node 仍显式写 cache: npm —— v5 起有基于 package.json 的 packageManager 字段自动开缓存的行为，
+      # 显式声明比依赖自动探测更可预期（本项目目前没有该字段）。
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
