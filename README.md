@@ -1,4 +1,6 @@
-# wiznote-enhanced: 为知笔记增强脚本
+# wiznote-enhanced: 为知笔记增强油猴脚本
+
+[![License](https://img.shields.io/github/license/zhb2000/wiznote-enhanced?style=flat-square)](https://github.com/zhb2000/wiznote-enhanced/blob/master/LICENSE) [![Release](https://img.shields.io/github/v/release/zhb2000/wiznote-enhanced?style=flat-square&label=release)](https://github.com/zhb2000/wiznote-enhanced/releases/latest) [![WizNote](https://img.shields.io/badge/wiznote%20xapp-v0.1.107-4a90d9?style=flat-square)](https://www.wiz.cn/xapp) [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-2ea44f?style=flat-square)](https://www.tampermonkey.net/) [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-2ea44f?style=flat-square)](https://violentmonkey.github.io/)
 
 为知笔记网页版（<https://www.wiz.cn/xapp>）的增强油猴脚本。
 
@@ -11,7 +13,7 @@
 
 ## 安装
 
-1. 浏览器安装油猴扩展程序：[Tampermonkey（篡改猴）](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) 或 [Violentmonkey（暴力猴）](https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag)。
+1. 浏览器安装油猴扩展程序：[Tampermonkey（篡改猴）](https://www.tampermonkey.net) 或 [Violentmonkey（暴力猴）](https://violentmonkey.github.io)。
 2. 安装本项目脚本：打开 <https://github.com/zhb2000/wiznote-enhanced/releases/latest/download/wiznote-enhanced.user.js>，油猴会弹出安装确认。
 3. 打开新版为知笔记（<https://www.wiz.cn/xapp>）并登录，右键任意笔记就能看到菜单项。
 
