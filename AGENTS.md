@@ -86,6 +86,8 @@
 | 资源的格式校验与占位图识别（**按内容**，别按扩展名） | `src/export/app-bridge.ts` 的 `sniffImageFormat()` / `looksLikePlaceholder()`（见 [docs/export-pipeline.md §4.1.1](docs/export-pipeline.md)） |
 | 请求节流 / 本地命中判定 / 网络失败重试 | `src/export/app-bridge.ts` 的 `pacedFetch()`、`requestPacer`（`createRequestPacer`）、`attemptCandidates()`（见 [docs/export-pipeline.md §十](docs/export-pipeline.md)） |
 | markdown 图片 / 链接目标的解析（title / `=尺寸` / `\|` 多图 / `<url>` / 目标里的成对括号）、资源名在请求路径里的转义、富文本正文的反转义 | `src/export/markdown-inline.ts` 的 `replaceInlineLinks()`、`splitImageTitle()`、`rewriteImageTargets()`、`encodePathSegment()`、`unescapeMarkdown()`（**刻意零依赖**：`npm run check:markdown` 要直接 import 它，别给它加 import；见 [docs/export-pipeline.md §4.1.2、§4.1.3、§4.2、§6.1](docs/export-pipeline.md)） |
+| 笔记链接（内链 `wiz://open_document` / 协作双链 `[[名称 id=…]]`）→ wikilink、wikilink 名字的冲突判定与回退、markdown 链接目标的百分号编码 | `src/export/note-content.ts` 的 `rewriteInternalLinks()` / `rewriteWikiLinks()` / `resolveLinkTarget()` / `noteBaseName()`（名字与校验的纯函数在 `markdown-inline.ts`，同样**零依赖**）；目标标题来自 `src/export/app-bridge.ts` 的 `resolveNoteTitles()`；名字冲突时退化成标准 markdown 链接要用批次落点，见 [docs/export-pipeline.md §9.1、§9.3](docs/export-pipeline.md) |
+| 一篇笔记在产物里的落点（目录名 / 正文文件名 / ` (N)` 消歧） | `src/export/task.ts` 的**预分配**那段（渲染前按顺序登记一遍；循环里不再分配）；命名规则本身仍然只在 `src/export/naming.ts`（见 [docs/export-pipeline.md §1.4、§9.3](docs/export-pipeline.md)） |
 | 宿主 `html2Doc` 解析失败时的补救（空表格重试 / HTML 兜底产物） | `src/export/note-content.ts` 的 `stripCellLessTables()`、`buildHtmlOnlyResult()`（见 [docs/export-pipeline.md §5.4](docs/export-pipeline.md)） |
 | 空笔记（正文为空）也要正常导出 | `src/export/note-content.ts` 的 `renderNote()` —— **别**再加“内容为空就跳过” |
 | 笔记元数据 / front matter | `src/export/metadata.ts` |

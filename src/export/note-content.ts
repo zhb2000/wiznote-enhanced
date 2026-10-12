@@ -14,6 +14,7 @@ import {
   readNoteTags,
   rememberResourceSource,
   resolveKsUrl,
+  resolveNoteTitles,
   resolveTagPaths,
   syncCollabDoc,
   triggerRemoteDocFetch,
@@ -35,9 +36,12 @@ import {
   EXTERNAL_URL,
   IMAGE_EXT,
   linkTargetParts,
+  renderMarkdownLink,
+  renderWikiLink,
   replaceInlineLinks,
   rewriteImageTargets,
   unescapeMarkdown,
+  wikilinkConflict,
 } from './markdown-inline';
 import { convertToValidFilename, createNameAllocator, portableName, toDiskName } from './naming';
 import {
@@ -48,7 +52,7 @@ import {
   type NoteType,
 } from './note-type';
 import { outlineHtmlToMarkdown } from './outline';
-import type { ExportOptions, MetadataFormat, NoteRef } from './types';
+import type { BatchPathIndex, ExportOptions, MetadataFormat, NoteRef } from './types';
 
 const log = logger('export');
 
@@ -161,36 +165,6 @@ function extractMarkdownFromLiteHtml(html: string): string {
  * 能把脏字符串直接喂进来测（配对括号那个坑就是这么钉住的）。`EXTERNAL_URL` 与
  * `IMAGE_EXT` 也从那里来。
  */
-
-/**
- * 协作笔记的**双向链接**（wiki-link）：`[[<名称> id=<guid>]]` → `[[<名称>]]`。
- *
- * 它在 doc 里是**行内文本属性** `{ type: 'wiki-link', name, linkId }`，
- * `doc2markdown` 把它序列化成应用自家方言 `[[<name> id=<linkId>]]`。那段 `id=<guid>`
- * 让主流渲染器（Obsidian / 思源 / Logseq）**解析不出来，只能当纯文本显示**；
- * 去掉它就成了通用的 wikilink，离线也能点开。
- *
- * 代价（刻意的取舍）：丢掉 `linkId` 这个**稳定锚点**，从此按标题匹配 ——
- * 目标笔记改名后就指不准了（`name` 还是创建链接时的快照）。
- *
- * 几条边界：
- * - **只作用在协作笔记上**（调用方判断类型）。Lite Markdown 笔记的正文是用户手写的
- *   markdown，里面的 `[[…]]` 是原文，绝不能动 —— 和 §六 的反转义是同一条约定；
- * - 只认“带 `id=<36 位 guid>`”的形态，普通 `[[名称]]` 原样不动；
- * - 名称里不允许有 `[` `]`（否则边界无法确定），所以用户**手打在双链外面**的那对方括号
- *   会被保留：`[` + `[[名称 id=guid]]` + `]` → `[[[名称]]]`（那对方括号本来就是正文）。
- */
-const WIKI_LINK = /\[\[([^[\]\n]{1,200}?)\s+id=[0-9a-fA-F-]{36}\]\]/g;
-
-function rewriteWikiLinks(markdown: string): string {
-  let count = 0;
-  const next = markdown.replace(WIKI_LINK, (_whole, name: string) => {
-    count += 1;
-    return `[[${name}]]`;
-  });
-  if (count > 0) log.debug('双链已去掉 id（[[名称 id=guid]] → [[名称]]）', { count });
-  return next;
-}
 
 /**
  * 资源名 → 落盘路径的分配器。
@@ -635,6 +609,208 @@ function rewriteHtmlAttachments(html: string, byGuid: Map<string, PlannedAttachm
       `href=${quote}${item.href}${quote}`,
     );
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 笔记链接（内链 / 双链）→ wikilink                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 正文里的**笔记内链**（实测 2026-10-12，xapp 0.1.107）：应用菜单里的“复制笔记内链”
+ * 生成的就是它，落进正文后是一个普通 `<a>`：
+ *
+ * ```html
+ * <a href="wiz://open_document?guid=<目标 docGuid>&kbguid=&private_kbguid=<本库 kbGuid>">标题快照</a>
+ * ```
+ *
+ * 三个参数都会被整条替换掉 —— 转成 wikilink 之后产物里既不再有宿主协议（静态文件里
+ * 点不开），也不再有库标识 `private_kbguid`（它绕过了“附带 WizNote 原始字段”那个开关，
+ * 所以此前是**无条件**写进产物的）。见 docs/export-pipeline.md §9.3。
+ *
+ * 形态实测：`kbguid` 为空、`private_kbguid` 等于链接所在的知识库 —— 抽查到的内链形态一致。
+ */
+const INTERNAL_LINK_TARGET = /^wiz:\/\/open_document\?/i;
+const INTERNAL_LINK_GUID = /[?&]guid=([0-9a-fA-F-]{36})/;
+/** 探针（无 `g` 标志）：决定要不要去读那张 `docs` 表 —— 正文里没有链接就别白读 */
+const HAS_INTERNAL_LINK = /wiz:\/\/open_document\?/i;
+
+/**
+ * 协作笔记的**双向链接**（wiki-link）：`[[<名称> id=<guid>]]` → `[[<名称>]]`。
+ *
+ * 它在 doc 里是**行内文本属性** `{ type: 'wiki-link', name, linkId }`，
+ * `doc2markdown` 把它序列化成应用自家方言 `[[<name> id=<linkId>]]`。那段 `id=<guid>`
+ * 让主流渲染器（Obsidian / 思源 / Logseq）**解析不出来，只能当纯文本显示**；
+ * 去掉它就成了通用的 wikilink，离线也能点开。
+ *
+ * 几条边界：
+ * - **只作用在协作笔记上**（调用方判断类型）。Lite Markdown 笔记的正文是用户手写的
+ *   markdown，里面的 `[[…]]` 是原文，绝不能动 —— 和 §六 的反转义是同一条约定；
+ * - 只认“带 `id=<36 位 guid>`”的形态，普通 `[[名称]]` 原样不动；
+ * - 名称里不允许有 `[` `]`（否则边界无法确定），所以用户**手打在双链外面**的那对方括号
+ *   会被保留：`[` + `[[名称 id=guid]]` + `]` → `[[[名称]]]`（那对方括号本来就是正文）。
+ */
+const WIKI_LINK = /\[\[([^[\]\n]{1,200}?)\s+id=([0-9a-fA-F-]{36})\]\]/g;
+/** 探针（无 `g`）：`/g` 正则的 `test()` 会推进 `lastIndex`，不能拿它探 */
+const HAS_WIKI_LINK = /\[\[[^[\]\n]{1,200}?\s+id=[0-9a-fA-F-]{36}\]\]/;
+
+/** 改写笔记链接时需要的两份索引 */
+interface LinkRewriteContext {
+  /** `docGuid`（小写）→ 目标**当前**标题（本地 `docs` 表；查不到就没有这一项） */
+  titles: Map<string, string>;
+  /**
+   * `docGuid`（小写）→ 本次产物里的落点。**只有同批次的笔记才有** ——
+   * 名字里有冲突字符时要退化成标准 markdown 链接，而那需要知道目标的相对路径，
+   * 这件事只有“它也在这一批里”时才说得准（见 `task.ts` 的预分配）。
+   */
+  batch: BatchPathIndex;
+}
+
+/** 冲突回退的记账：同一篇里同一种毛病攒成一条“问题”，不刷屏 */
+interface LinkConflicts {
+  /** 目标名 → 命中的冲突字符 */
+  targets: Map<string, string>;
+  /** 退化成纯文本的链接条数 */
+  count: number;
+}
+
+/** 标题 → 产物里的名字（正文文件名去掉 `.md`）；`.md` / `.md ` / `.md@` 变体一起剥 */
+function diskNameOf(title: string): string {
+  return toDiskName(extractNoteTitle(title), '未命名笔记');
+}
+
+/**
+ * 一篇笔记在产物里的名字（不含目录）—— 就是正文文件名去掉 `.md`，也是 wikilink 里写的那个。
+ *
+ * 两道工序与落盘完全同一套（见 naming.ts）：先剥 `.md` 后缀，再 `对齐上游清洗 → 落盘加固`。
+ * 所以链接里的名字与 zip 里的文件名**恒等**，包括标题里的非法字符（`a/b` → 文件 `a b.md`
+ * → 链接 `[[a b]]`）和长度截断。
+ */
+export function noteBaseName(note: NoteRef): string {
+  return diskNameOf(note.title || '');
+}
+
+/**
+ * 把一条笔记链接的目标解析成“产物里那个名字”。
+ *
+ * 三级来源，可靠性从高到低：
+ * 1. **目标也在本次导出里** → 直接用产物里的名字（`task.ts` 预分配的落点）；
+ * 2. **本地 `docs` 表里有这条 docGuid** → 用目标**当前**标题推算（同一套命名函数）；
+ * 3. 都没有 → 用链接自带的名字（内链是链接文案、双链是 `name` 快照）。
+ *
+ * 为什么第 1 级要压过第 2 级：产物里的名字来自**笔记对象**（列表接口给的 DTO），
+ * 与本地 `docs` 行理论上可能不一致（标签就实测过这种差异，见 `readNoteTags()`）。
+ * **落盘用哪个，链接就必须写哪个** —— 同批次时以产物为准，才不会写出悬空链接。
+ */
+function resolveLinkTarget(
+  targetGuid: string | undefined,
+  fallbackName: string,
+  context: LinkRewriteContext,
+): { name: string; productPath?: string } {
+  const key = targetGuid?.toLowerCase();
+  if (key) {
+    const batched = context.batch.get(key);
+    if (batched) return { name: batched.name, productPath: batched.path };
+    const title = context.titles.get(key);
+    if (title) return { name: diskNameOf(title) };
+  }
+  const trimmed = fallbackName.trim();
+  return { name: trimmed ? diskNameOf(trimmed) : '' };
+}
+
+/**
+ * 目标的落点 → **从当前这篇看过去**的相对路径。
+ *
+ * 多篇导出时每篇都在自己的文件夹里（`标题/标题.md`），所以兄弟笔记是 `../目标/目标.md`；
+ * 单篇导出（只有一篇、不建文件夹）时落点就是 `标题.md`，同目录直接写名字。
+ */
+function relativeProductPath(path: string): string {
+  return path.includes('/') ? `../${path}` : path;
+}
+
+/**
+ * 一条笔记链接 → 产物里的写法，这是整套规则的最后一步。
+ *
+ * | 名字 | 目标在本次导出里 | 产物 |
+ * | --- | --- | --- |
+ * | 没有冲突字符 | — | `[[名字]]` |
+ * | 有（`[ ] # ^ %%`） | 在 | 标准 markdown 链接（相对路径 + 百分号编码）—— **算成功导出，不报问题** |
+ * | 有 | 不在 | 纯文本 + 记进“问题” |
+ *
+ * 为什么冲突时必须退：wikilink **没有转义机制**（官方文档的措辞是“含有这些字符的字符串
+ * 可能无法作为链接生效”，给的规避方式是别在文件名里用它们）。而标准 markdown 链接形式
+ * **有**正规的转义途径（目标做 percent-encoding），所以在拿得到相对路径时用它兜住；
+ * 拿不到相对路径时，硬写一条指向不存在文件的 markdown 链接只会更糟，不如退成纯文本。
+ */
+function renderNoteLink(
+  target: { name: string; productPath?: string },
+  fallbackText: string,
+  conflicts: LinkConflicts,
+): string {
+  const conflict = target.name ? wikilinkConflict(target.name) : '空名字';
+  if (!conflict) return renderWikiLink(target.name);
+  if (target.productPath) return renderMarkdownLink(target.name, relativeProductPath(target.productPath));
+
+  conflicts.count += 1;
+  conflicts.targets.set(target.name || fallbackText, conflict);
+  // 名字都没解出来（链接文案本身是空的）时就只剩纯文本，等于把这处链接抹掉
+  return target.name || fallbackText;
+}
+
+/**
+ * 正文里的**笔记内链** → wikilink。
+ *
+ * 只处理“宿主把富文本转成 markdown 时原样带出来的”那种形态
+ * （`[文案](wiz://open_document?guid=…)`）：Lite Markdown 笔记的正文是用户手写的
+ * markdown，里面的 `wiz://` 是**原文**，不能动（与反转义、双链改写同一条规矩）；
+ * 大纲笔记的 HTML 里本来就没有这类链接。
+ */
+function rewriteInternalLinks(
+  markdown: string,
+  context: LinkRewriteContext,
+  conflicts: LinkConflicts,
+): string {
+  let count = 0;
+  const next = replaceInlineLinks(markdown, (link) => {
+    if (link.image) return undefined;
+    const { target } = linkTargetParts(link.raw);
+    if (!INTERNAL_LINK_TARGET.test(target)) return undefined;
+    count += 1;
+    const guid = INTERNAL_LINK_GUID.exec(target)?.[1];
+    return renderNoteLink(resolveLinkTarget(guid, link.label, context), link.label, conflicts);
+  });
+  if (count > 0) log.debug('笔记内链已改写', { count });
+  return next;
+}
+
+/** 协作笔记的双链 → wikilink（规则与内链完全同一套，区别只在目标从 `linkId` 来） */
+function rewriteWikiLinks(
+  markdown: string,
+  context: LinkRewriteContext,
+  conflicts: LinkConflicts,
+): string {
+  let count = 0;
+  const next = markdown.replace(WIKI_LINK, (_whole, name: string, linkId: string) => {
+    count += 1;
+    return renderNoteLink(resolveLinkTarget(linkId, name, context), name, conflicts);
+  });
+  if (count > 0) log.debug('双链已改写', { count });
+  return next;
+}
+
+/**
+ * 退化成纯文本的那些链接 → 结果页的“问题”。
+ *
+ * ⚠️ 只在“目标不在本次导出里”时才会有内容：目标在同一批里时我们已经给出了可用的
+ * 标准 markdown 链接，那算成功导出，不打扰用户。
+ */
+function linkConflictProblems(conflicts: LinkConflicts): string[] {
+  if (conflicts.count === 0) return [];
+  const shown = [...conflicts.targets].slice(0, 3).map(([name, char]) => `《${name}》（含 ${char}）`);
+  const more = conflicts.targets.size > shown.length ? ` 等 ${conflicts.targets.size} 个目标` : '';
+  return [
+    `有 ${conflicts.count} 条笔记链接指向的文件名含 wikilink 表达不了的字符（${shown.join('、')}${more}），` +
+      '它们不在这批导出里、拿不到相对路径，已退化成纯文本（把目标笔记一起选上再导一次即会变成链接）',
+  ];
 }
 
 /* ------------------------------------------------------------------ */
@@ -1346,17 +1522,21 @@ function stripCellLessTables(html: string): string {
  * 让出主线程（`utils/yield.ts`，按时间预算，小笔记一次都不让）。所以这里刻意保持
  * “一步一让”的写法：**别把相邻几步合并成一行**——合并就把让出点吃掉了，
  * 一份几十 MB 的剪藏又会在主线程上连成一大段。
+ *
+ * `batch` 是**本次批次**里每篇笔记的产物落点（`task.ts` 预分配，见 `BatchNotePath`）：
+ * 正文里的笔记链接改写成 wikilink 时，只有当目标也在这一批里，才可能在名字冲突时
+ * 退化成标准 markdown 链接（那时我们才知道它的相对路径）。单篇导出时它是空的。
  */
 export async function renderNote(
   note: NoteRef,
   options: ExportOptions,
   signal?: AbortSignal,
+  batch: BatchPathIndex = new Map(),
 ): Promise<RenderOutcome> {
   const liveEditor = getLiveEditor();
   const noteType = getNoteType(note);
   const noteTypeLabel = NOTE_TYPE_LABEL[noteType];
-  // 先剥掉标题里的 .md 后缀，再走标准两道工序：对齐上游清洗 → 落盘加固（见 naming.ts）
-  const baseName = toDiskName(extractNoteTitle(note.title || ''), '未命名笔记');
+  const baseName = noteBaseName(note);
   // markdown 正文和 HTML 里的图片共用它分配文件名，保证两边指向同一份图
   const resourceNamer = createResourceNamer();
   /** 篇内让出器：这一篇的同步活最多连续占主线程 ~16ms（见 utils/yield.ts） */
@@ -1607,15 +1787,27 @@ export async function renderNote(
     : body;
 
   // 顺序有讲究：
-  //   1. 先把普通笔记附件的预览图换成附件链接 —— 必须在 rewriteImageTargets 之前，
+  //   0. 先改写**笔记链接**（内链 → wikilink、双链去 id）—— 和后面几步没有语法交集，
+  //      只是让“改写正文”的这几步排在一起更好读；
+  //   1. 再把普通笔记附件的预览图换成附件链接 —— 必须在 rewriteImageTargets 之前，
   //      否则那张 index_files/{attGuid}_image.png 会被当成图片下载进 images/；
-  //   2. 再改写 / 收集图片；
+  //   2. 然后改写 / 收集图片；
   //   3. 最后处理协作笔记的 embed 附件链接。
-  // 协作笔记的双链：`[[名称 id=guid]]` → `[[名称]]`。放在附件改写之前，
-  // 和它们没有语法交集，只是让"改写正文"的几步排在一起更好读。
-  const withWikiLinks = noteType === 'Collaboration' ? rewriteWikiLinks(withComments) : withComments;
-  await breathe();
-  const attached = rewriteNoteAttachments(withWikiLinks, attachmentPlan?.byGuid ?? new Map());
+  const conflicts: LinkConflicts = { targets: new Map(), count: 0 };
+  // 探一下再决定要不要读那张 `docs` 表：绝大多数笔记里没有笔记链接，别白读一遍整表
+  const hasWikiLink = noteType === 'Collaboration' && HAS_WIKI_LINK.test(withComments);
+  const hasInternalLink = HAS_INTERNAL_LINK.test(withComments);
+  let linked = withComments;
+  if (hasWikiLink || hasInternalLink) {
+    const linkContext: LinkRewriteContext = { titles: await resolveNoteTitles(note.kbGuid), batch };
+    if (hasInternalLink) {
+      linked = rewriteInternalLinks(linked, linkContext, conflicts);
+      await breathe();
+    }
+    if (hasWikiLink) linked = rewriteWikiLinks(linked, linkContext, conflicts);
+    await breathe();
+  }
+  const attached = rewriteNoteAttachments(linked, attachmentPlan?.byGuid ?? new Map());
   await breathe();
   const rewritten = rewriteImageTargets(attached.markdown, { rewrite: options.includeImages, namer: resourceNamer });
   await breathe();
@@ -1650,9 +1842,11 @@ export async function renderNote(
     : undefined;
   // 附件少导出不能是静默的：清单两边都没拿到时用户只会看到“附件 0 个”，
   // 却不知道笔记里其实挂着附件，所以对照 attachmentCount 提醒一句（规则见 attachmentProblemList）
+  // 同理，笔记链接退化成纯文本也不能是静默的（只在目标不在这一批里时才会发生，见 linkConflictProblems）
   const problems = [
     ...(localizedSource?.problems ?? []),
     ...attachmentProblemList(note, attachmentPlan),
+    ...linkConflictProblems(conflicts),
   ];
   // 注意顺序：批注章节要在 rewriteImageTargets 之后追加，
   // 否则它自己注入的 images/annotation-N.svg 会被当成待下载资源。

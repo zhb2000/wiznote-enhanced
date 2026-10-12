@@ -279,3 +279,74 @@ export function linkTargetParts(raw: string): { target: string; rest: string } {
   if (space < 0) return { target: trimmed, rest: '' };
   return { target: trimmed.slice(0, space), rest: trimmed.slice(space) };
 }
+
+/* ------------------------------------------------------------------ */
+/* 笔记链接（内链 / 双链）→ wikilink / markdown 链接                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * wikilink 名字里**没法表达**的字符；返回第一个命中的那一个（用于提示文案）。
+ *
+ * wikilink 没有任何转义机制 —— Obsidian 官方帮助文档（`Linking notes and files /
+ * Internal links`）的原话是“含有以下字符的字符串可能无法作为链接生效”，给的规避方式是
+ * **别在文件名里用它们**（官方清单：`# | ^ : %% [[ ]]`）。逐个对应：
+ * `[` `]` 是链接定界符本身、`#` 是锚点分隔符（`[[note#heading]]`）、`^` 是块引用分隔符
+ * （`[[note#^block]]`）、`%%` 与注释语法同形。
+ *
+ * ⚠️ 这里只挡**落盘名里真的可能出现**的那些：`|` `/` `\` `:` `*` `?` `"` `<` `>`
+ * 早在 `convertToValidFilename()`（naming.ts）里就被换成空格了，轮不到它们破坏语法。
+ * 单 `%` 也不挡 —— `100%` 这种名字很常见，官方清单里只有 `%%`。
+ */
+const WIKILINK_CONFLICT = /[\[\]#^]|%%/;
+
+export function wikilinkConflict(name: string): string | undefined {
+  return WIKILINK_CONFLICT.exec(name)?.[0];
+}
+
+/**
+ * 渲染成 wikilink。
+ *
+ * 名字由调用方按**产物里的文件名**规则归一化（`toDiskName(extractNoteTitle(标题))`，
+ * 见 note-content.ts 的 `noteBaseName()`）：wikilink 是按名字匹配的，写出来的名字必须
+ * 与落盘文件名一字不差，`.md` 后缀也**不写**（Obsidian 的 `[[名字]]` 与 `[[名字.md]]`
+ * 等价，默认生成的就是不带后缀的那种；带后缀在其他渲染器里还会把 `.md` 显示出来）。
+ */
+export function renderWikiLink(name: string): string {
+  return `[[${name}]]`;
+}
+
+/**
+ * markdown 链接**显示文本**里的转义。
+ *
+ * 只有回退成标准 markdown 链接时才用得上（wikilink 没有单独的显示文本），而标题里
+ * `[` `]` 很常见（网页剪藏那种 `[栏目]标题` 的写法）：`]` 会提前结束 `[...]`，
+ * 所以 `\` `[` `]` 一律转义。
+ */
+export function escapeLinkText(text: string): string {
+  return text.replace(/[\\[\]]/g, (char) => `\\${char}`);
+}
+
+/**
+ * 产物内的相对路径 → markdown 链接目标。
+ *
+ * **逐段**做 percent-encoding、并保留段之间的 `/`：目标是**路径**，不能整串丢给
+ * `encodeURIComponent`（它会把 `/` 也编掉）。这正是 wikilink 冲突时的出路 ——
+ * markdown 链接形式有正规的转义途径（官方要求目标做 percent-encoding），wikilink 没有。
+ *
+ * `(` `)` `'` 按 `encodeAttachmentName()` 的口径一并编掉：它们在裸目标里要么破坏括号
+ * 配对、要么在部分渲染器里需要转义。空格 / 中文 / `#`（fragment）/ `^` / `[` `]` 都由
+ * `encodeURIComponent` 负责。
+ */
+export function encodeMarkdownPath(path: string): string {
+  return path
+    .split('/')
+    .map((segment) =>
+      encodeURIComponent(segment).replace(/[()']/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`),
+    )
+    .join('/');
+}
+
+/** 渲染成标准 markdown 链接（wikilink 表达不了时的回退） */
+export function renderMarkdownLink(label: string, path: string): string {
+  return `[${escapeLinkText(label)}](${encodeMarkdownPath(path)})`;
+}

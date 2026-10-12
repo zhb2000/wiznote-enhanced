@@ -127,6 +127,20 @@ window.LiveEditor.syncOfflineDoc(ksURL, appId, docId, timeout)
 
 导出侧的用法见 [export-pipeline.md §4.5](export-pipeline.md#45-附件二普通笔记的-attachments-表)。
 
+### 2.8 笔记链接的两种写法（内链 / 双链）
+
+**内链**（应用菜单里的“复制笔记内链”）在正文里就是一个普通 `<a>`：宿主协议 `wiz://open_document` + 目标 docGuid + 两个库标识（形态见 [export-pipeline.md §9.3](export-pipeline.md)）。实测（2026-10-12）：抽查到的内链形态一致 —— `guid` 是目标 docGuid、`kbguid` 为空、`private_kbguid` 等于链接所在的知识库。`html2Doc → doc2markdown` 把它原样转成 `[标题快照](wiz://open_document?…)`；`wiz://` 是桌面端壳自己的协议，导出产物里点不开。
+
+**双链**只有协作笔记有：doc 里的行内文本属性 `{ type: 'wiki-link', name, linkId }`，`doc2markdown` 序列化成应用自家方言 `[[名称 id=<linkId>]]`（见 [export-pipeline.md §9.1](export-pipeline.md)）。
+
+两条路各自带一个**稳定锚点**，但用处不同：
+
+- 内链 URL 里的 `guid`、双链的 `linkId` **都是目标笔记的 docGuid**（抽查到的双链**全部**能在本地 `docs` 表查到目标）；
+- `name` / 链接文案只是**创建链接那一刻的标题快照** —— 目标改名后不会跟着变。抽查里就有这种快照已经和目标当前标题对不上的双链（同一条 `linkId` 上甚至挂着两个不同的过期名字，比例见 `docs/private.local/note-links.md`）。所以导出时应当用 guid 查**当前**标题，别信快照。
+- 内链**没有**暴露成任何应用 API：只能在正文 HTML / markdown 里认出那个 URL 形态，按 `guid` 取目标。
+
+落盘名里可能带 wikilink 表达不了的字符（`[` `]` `#` `^` `%%`），处理规则见 [export-pipeline.md §9.3](export-pipeline.md)；本库的计数与具体样本见 `docs/private.local/note-links.md`。
+
 ---
 
 ## 三、IndexedDB
@@ -163,6 +177,12 @@ window.LiveEditor.syncOfflineDoc(ksURL, appId, docId, timeout)
 ### 3.3 笔记类型
 
 `docs.type` 的实际取值见 [note-types.md § 一](note-types.md#一原始-type-字段)。
+
+### 3.3.1 `docs` 表可以当“guid → 当前标题”的索引
+
+`docs` 的主键是 `[kbGuid, docGuid]`，行上的 `title` 就是笔记**当前**标题（标题 / 分类改过之后这张表跟着应用更新）。所以只要手上有 docGuid（内链 URL 里的 `guid`、双链的 `linkId`），就能在本地把“目标现在叫什么”查出来，**零网络**。导出侧的用法与理由见 [export-pipeline.md §9.1 / §9.3](export-pipeline.md)（`resolveNoteTitles()`：整表读一次、按知识库缓存）。
+
+⚠️ 同时也要记住：**列表接口给的 DTO 与 `docs` 行可能不一致**（`tags` 就实测过这种差异，见 §3.4），所以批量导出时“目标也在这一批里”的那种情况要以**产物里的名字**为准，不能反过来信 `docs`。
 
 ### 3.4 `tags` 表是一棵树
 

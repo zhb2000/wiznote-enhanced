@@ -13,6 +13,24 @@ export interface NoteRef {
 /** 元数据的落盘形态 */
 export type MetadataFormat = 'yaml' | 'json';
 
+/**
+ * 一篇笔记**在本次产物里**的落点（由 `task.ts` 在渲染前预分配）。
+ *
+ * 只服务一件事：正文里的笔记内链 / 双链要改写成 wikilink，而 wikilink 的名字里不允许
+ * 出现 `[` `]` `#` `^` `%%`（宿主没有转义机制）。名字里带这些字符时，**只有目标也在这一批里**
+ * 才能退化成标准 markdown 链接（我们得知道它的相对路径）；不在这一批里就只能退化成纯文本。
+ * 见 `note-content.ts` 的 `rewriteInternalLinks()` 与 docs/export-pipeline.md §9.3。
+ */
+export interface BatchNotePath {
+  /** zip 内的相对路径，例如 `标题/标题.md`（单篇导出时是 `标题.md`） */
+  path: string;
+  /** 产物里的名字（不含目录与 `.md`）—— wikilink 写的就是它 */
+  name: string;
+}
+
+/** 本次批次：`docGuid`（小写）→ 落点 */
+export type BatchPathIndex = Map<string, BatchNotePath>;
+
 /** 导出选项，来自对话框 */
 export interface ExportOptions {
   /** 把图片下载成文件并放进 zip 的 images/ 目录 */

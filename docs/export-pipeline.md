@@ -168,6 +168,8 @@ zip 里的每一个名字（文件夹、正文文件、`images/`、`attachments/
 
 **消歧只落在文件夹上，不改正文文件名**：多篇导出时每篇一个与标题同名的文件夹，同标题靠文件夹加 ` (2)` 区分，正文固定叫 `<标题>.md`。所以笔记自己的文件名恒等于标题，与我们造的容器无关。
 
+**这些名字在渲染前就预分配好**（`exportNotes()` 开头按同一顺序登记一遍，循环里不再分配）：正文里的笔记链接改写成 wikilink 时，名字冲突的那几条要退化成标准 markdown 链接，而目标的相对路径只有**同批次**的笔记才说得准 —— 见 §9.3。
+
 > **后缀永不嵌套**：每次都从**原名**重新生成 ` (N)`，所以标题本来就叫 `报告 (2)` 也不会变成 `报告 (2) (2)`，只会顺延到 `报告 (3)`。
 >
 > **“不该发生”的情况只有一种姿势**：正文与 sidecar 走 `reserve()`（只登记不改名）、资源走 `allocate()`（可能改名），`buildZip()` 里还查一遍路径重复 —— 这三处都只可能由代码 bug 触发，统一按 `invariant()` 处理：**开发模式直接抛错、生产构建只记 `error`**。生产不抛是刻意的：导出是几分钟的长流程，抛错会让 `session.ts` 里那一圈 try/catch 把整份成果作废，代价与收益不匹配（见 `src/utils/invariant.ts`）。
@@ -1150,7 +1152,7 @@ wiznote:
 
 各类型走哪条路（Lite 走原文、协作走 doc JSON、其余走 HTML → doc）见 [note-types.md § 三](note-types.md#三总表界面名--判定--转换策略)。
 
-我们对 `doc2markdown` 的产物只做**两处**后处理：反转义（§六）与双链改写（§9.1）。两处都只作用于 `html2Doc → doc2markdown` 这条路，Lite Markdown 的正文是用户手写的原文，一律不动。
+我们对 `doc2markdown` 的产物只做**三处**后处理：反转义（§六）、双链改写（§9.1）与内链改写（§9.3）。三处都只作用于 `html2Doc → doc2markdown` 这条路，Lite Markdown 的正文是用户手写的原文，一律不动。
 
 唯一的例外是**大纲笔记**：它的正文不是 doc，整条路都不同 —— 自己遍历 `div.node` 树生成嵌套列表（§9.2），既不过 `html2Doc` 也不做反转义。
 
@@ -1163,27 +1165,29 @@ doc 里它是**行内文本属性**（不是独立块）：
   "linkId": "<目标笔记的 guid>", "id": "xxxxxxxx", "box": true, "created": 1770864306635 } }
 ```
 
-`doc2markdown` 把它序列化成**应用自家方言** `[[<name> id=<linkId>]]`。那段 `id=<guid>` 让主流渲染器（Obsidian / 思源 / Logseq）**解析不出来，只当纯文本**，所以导出时去掉它：
+`doc2markdown` 把它序列化成**应用自家方言** `[[<name> id=<linkId>]]`。那段 `id=<guid>` 让主流渲染器（Obsidian / 思源 / Logseq）**解析不出来，只当纯文本**，所以导出时去掉它，并按**目标笔记当前的名字**落成 wikilink：
 
 ```
-[[名称 id=<guid>]]   →   [[名称]]
+[[名称 id=<guid>]]   →   [[当前名字]]
 ```
 
-代价（刻意的取舍）：丢掉 `linkId` 这个**稳定锚点**，从此按标题匹配 —— 目标改名后就指不准了；`name` 本身还是**创建链接那一刻的快照**。
+`linkId` 就是目标笔记的 docGuid（实测 2026-10-12：抽查到的双链**全部**能拿它在本地 `docs` 表里查到目标），所以顺手修掉了 `name` 快照会过期的问题 —— 抽查里就有一篇笔记的两条双链，存的快照**都不是**目标的当前标题（按老写法**两条都是悬空链接**）。查不到（目标不在本地、或在别的知识库）时退回 `name`。
 
 几条边界：
 
 - **只作用在协作笔记上**（`noteType === 'Collaboration'`）。Lite Markdown 笔记的正文是用户手写的 markdown，里面的 `[[…]]` 是原文，绝不能动 —— 与 §六 的反转义是同一条约定。
 - 只认“带 `id=<36 位 guid>`”的形态，普通 `[[名称]]` 原样不动。
 - 名称里不允许有 `[` `]`（否则边界无法确定），所以**用户手打在双链外面**的那对方括号会被保留：`[` + `[[名称 id=guid]]` + `]` → `[[[名称]]]`。那不是我们多出来的括号，用户本来就打了 `[` `]`，`doc2markdown` 把它转义成 `\[` `\]`，我们的反转义又还原回来。
+- 名字怎么归一化、名字里有 wikilink 表达不了的字符时怎么办 —— 与内链**共用同一套规则**，见 §9.3。
 
-**实测（2026-10-04，xapp 0.1.107）**：
+**实测（2026-10-04 / 2026-10-12，xapp 0.1.107）**：
 
 - 含双链的协作笔记样本确实存在（样本清单见 `docs/private.local/samples.md`）；行内属性类型只见到 `wiki-link` / `math` / `br` / 无。抽查普通笔记的 HTML，`wiki` / `linkId` 标记均未命中 —— 这个特性只在协作笔记里。
 - 两种形态都实测过导出：只插一个双链 → `[[目标笔记标题]]`；双链外面用户自己打过 `[` `]` 的 → `[[[目标笔记标题]]]`（那对方括号是用户本来就打的，不是我们多出来的）。
 - 回归：一篇带附件的普通笔记导出结果一字未变（`图片 1/1 · 附件 1/1`）；抽查 Lite 笔记的正文里 `[[` 均未命中（当前没有暴露面，但类型闸门照旧保留）。
+- **改用当前标题后（2026-10-12）**：那篇双链名字已过期的协作笔记，导出的两条链接都指回目标**当前**名字（不再是那份过期快照），`id=` 残留 0 处、结果区 `问题 0`。
 
-> **没做的方案**（讨论过、按 B 结论搁置）：转成批次内的相对链接 `[名称](../目标/目标.md)`（需要把"批次路径表"从 `exportNotes` 传进 `renderNote`，并在多篇导出时预分配文件夹名），或补一节“双链”把 `linkId` 留在文末，以及**反链**。真要做得留 `linkId` 的话，现在这条改写是唯一要改的地方。
+> **没做的方案**：补一节“双链”把 `linkId` 留在文末，以及**反链**。真要做得留 `linkId` 的话，现在这条改写是唯一要改的地方。
 
 ### 9.2 大纲笔记：`div.node` 树 → 嵌套列表
 
@@ -1226,6 +1230,63 @@ doc 里它是**行内文本属性**（不是独立块）：
 
 > 大纲笔记的 HTML 里没有 `<img>`、没有 `wiz://` 附件链接、也没有批注层，所以下游的图片 / 附件 / 批注改写对它都是空转 —— 不是被跳过，是本来就没有。
 
+### 9.3 正文里的笔记内链（`wiz://open_document`）→ wikilink
+
+应用菜单里的**“复制笔记内链”**落进正文后是一个普通 `<a>`（实测 2026-10-12，xapp 0.1.107）：
+
+```html
+<a href="wiz://open_document?guid=<目标 docGuid>&kbguid=&private_kbguid=<本库 kbGuid>">标题快照</a>
+```
+
+`html2Doc → doc2markdown` 原样把它转成 `[标题快照](wiz://open_document?…)`，而链路上**没有一步处理它** —— 产物里于是留着一堆点不开的宿主协议链接（`wiz://` 是桌面端壳自己的协议、静态文件里没有处理者），顺带把 `private_kbguid` 明文写进了 md（它**绕过**了“附带 WizNote 原始字段”那个开关）。实测（2026-10-12）：含内链的笔记里形态完全一致 —— `kbguid` 为空、`private_kbguid` 等于链接所在的知识库（样本与计数见 `docs/private.local/note-links.md`）。
+
+处理方式与双链（§9.1）**完全同一套规则**：按 `guid` 查当前标题 → 归一到落盘名 → 落成 `[[名字]]`。整条 URL（含两个 kbguid 参数）被替换掉，所以产物里既没有宿主协议、也没有库标识。
+
+#### 名字从哪来（三级，可靠性从高到低）
+
+| 级 | 来源 | 说明 |
+| --- | --- | --- |
+| 1 | **目标也在本次导出里** | 用 `task.ts` 预分配的产物名。落盘用哪个，链接就写哪个 —— 产物名来自笔记对象，与本地 `docs` 行理论上可能不一致（标签就实测过这种差异），所以同批次时以产物为准 |
+| 2 | 本地 `docs` 表（`resolveNoteTitles()`） | 用**当前**标题推算，零网络（主键 `[kbGuid, docGuid]`，行上有 `title`），按知识库缓存 |
+| 3 | 链接自带的名字 | 内链用链接文案、双链用 `name` 快照 |
+
+归一化用的是**落盘那把函数**（`noteBaseName()` → `toDiskName(extractNoteTitle(标题))`），所以：
+
+- **`.md` 后缀只出现一次**：旧版 markdown 笔记的标题形如 `标题.md`，产物文件名就是 `标题.md`，链接写 `[[标题]]`（`.md ` / `.md@` 这两种历史变体也一起剥）；
+- 标题里的非法字符与落盘一致：`a/b` → 文件 `a b.md`、链接 `[[a b]]`；
+- **显示文本 = 名字**，不加 `[[名字|原文案]]`：`.md` 标题的原文案本身带后缀，加 alias 只会得到 `[[标题|标题.md]]` 这种丑东西，而且 Obsidian 自己的行为就是“文件名即显示文本”。
+
+#### 名字里有 wikilink 表达不了的字符时
+
+wikilink **没有转义机制** —— Obsidian 官方帮助文档（`Linking notes and files / Internal links`）的措辞是“含有以下字符的字符串可能无法作为链接生效”，给的规避方式是**别在文件名里用它们**。官方清单是 `# | ^ : %% [[ ]]`，其中 `|` `/` `\` `:` `*` `?` `"` `<` `>` 早被 `convertToValidFilename()` 换成空格了，所以真正要挡的只有 `[` `]` `#` `^` 和 `%%`（单 `%` 不挡，`100%` 这种名字很正常）。
+
+| 情况 | 产物 | 结果区 |
+| --- | --- | --- |
+| 名字无冲突 | `[[名字]]` | — |
+| 有冲突、**目标也在这一批里** | 标准 markdown 链接 `[名字](../目标/目标.md)`（逐段 percent-encoding，`[`→`%5B`、`#`→`%23`） | **静默，算成功导出** |
+| 有冲突、目标不在这批里 | 纯文本（名字本身） | 记进“问题”，并提示“把目标笔记一起选上再导一次即会变成链接” |
+
+为什么冲突时不能用 wikilink：没有任何写法能把 `[` `]` `#` `^` 塞进 `[[…]]` 而不改变语义（`#` 是锚点分隔符、`^` 是块引用分隔符、`[` `]` 是定界符）。而标准 markdown 链接形式**有**正规的转义途径（目标做 percent-encoding），所以拿得到相对路径时就用它兜住。为什么第二种情况退成纯文本而不是硬写一条 markdown 链接：markdown 链接是**路径**语义，拿不到目标的相对路径时写出来的目标必然是错的 —— 那比没有链接更糟。
+
+本库里这类名字**很少但真实存在**，而且清一色是网页剪藏式的标题（`[…]` 前缀那种），计数与样本见 `docs/private.local/note-links.md`。
+
+**实测（2026-10-12）**：这一分支暂时没有真实样本（现有内链的目标都不带这些字符），所以用“**临时给每个名字加一个 `[x]` 造出冲突**”的办法端到端验了两边，**改完即撤销**（`grep -rn TEMP-VERIFY src/` 为空）：
+
+- **同批次**：批量导出“含内链的目录笔记”+“它指向的那一篇”→ 那条链接落成 `[目标名\[x\]](../%E7%9B%AE%E6%A0%87%E5%90%8D%5Bx%5D/%E7%9B%AE%E6%A0%87%E5%90%8D%5Bx%5D.md)`，指向 zip 里真实存在的那个文件；结果区 `问题 0`。
+- **不在批次**：同一篇里其余链接**全部**退化成纯文本，结果区 `问题 1`，文案是“有 N 条笔记链接指向的文件名含 wikilink 表达不了的字符（…），它们不在这批导出里、拿不到相对路径，已退化成纯文本（把目标笔记一起选上再导一次即会变成链接）”。
+
+#### 批次路径表（`task.ts` 预分配）
+
+冲突回退要知道目标的相对路径，而渲染是**逐篇**进行的 —— 轮到第一篇时，后面那篇的目录名还没分配。所以 `exportNotes()` 在渲染前先按同样的顺序把每篇的目录名与正文路径**预分配**并登记进分配器（`BatchPathIndex`：`docGuid` → `{ path, name }`），再随 `renderNote()` 的第四个参数传下去；循环里不再分配。副作用是“失败 / 被跳过的那一篇”也会占着名字 —— 刻意的：落点只由标题与顺序决定，与渲染成败无关，同一批的目录名才不会一会儿一个样。
+
+> 相对路径按“兄弟笔记”算：多篇导出时每篇在自己的文件夹里，所以目标是 `../目标/目标.md`；单篇导出不建文件夹（只有一篇时），落点就是 `标题.md`、直接写名字。
+
+#### HTML 产物里保留原样
+
+§4.6 那条“凡是产物里的 HTML，附件链接都改成本地文件”**不适用于内链**：HTML 产物（手写 / 公式笔记的正文，以及勾了“同时导出原始 HTML”的 sidecar）的定位是**保真备份**，而附件链接改成 `attachments/<文件名>` 之后真的能用起来（目标就在 zip 里）；内链的目标不在产物内，改成什么都不能让它工作。
+
+所以 HTML 里的 `wiz://open_document` **原样保留**，连同它的 `kbguid` / `private_kbguid`。这是**已知限制**（见 README）：HTML 里的内链点了没反应，且带本库标识。md 那条路没有这个问题（整条 URL 都被替换掉了）。
+
 ---
 
 ## 十、批量导出的服务端压力与对策
@@ -1263,18 +1324,19 @@ doc 里它是**行内文本属性**（不是独立块）：
 1. 虚拟域 `//wiznote-desktop/…`（由 Service Worker 拦截后交给本地数据服务）。资源名两种约定的路径差异见 §4.1。
 2. React fiber 上的 `memoizedProps.note` / `selectedItems`。
 3. `window.LiveEditor` 的 `getOfflineDocData` / `syncOfflineDoc` / `doc2markdown` / `html2Doc` / `getAllResources`。
-4. IndexedDB：`wiz-account`（`accounts`）、`wiz-<guid>`（`docs` / `data` / `kbs` / `attachments`）。
+4. IndexedDB：`wiz-account`（`accounts`）、`wiz-<guid>`（`docs` / `data` / `kbs` / `attachments`）。其中 `docs` 的 `title` 还被当成“guid → 当前标题”的索引（§9.1 / §9.3）。
 5. 普通笔记附件的三个接口：清单 `GET {kbServer}/ks/note/attachments/{kbGuid}/{docGuid}`、详情 `GET {kbServer}/ks/attachment/info/{kbGuid}/{docGuid}/{attGuid}`、下载 `GET {kbServer}/ks/attachment/download/{kbGuid}/{docGuid}/{attGuid}`（都要 token），以及正文里 `<a href="wiz://open_attachment?guid=…">` 这套写法（见 §4.5）。
+6. 正文里 `<a href="wiz://open_document?guid=…&kbguid=&private_kbguid=…">` 这套**笔记内链**写法（见 §9.3）—— 它没有任何 API，只能从正文里认。
 
 `src/features/export-menu.ts`：
 
-6. 列表菜单根节点 `#context-menu-note-list`，菜单项 class `menu-item` / `menu-text`，以及**复用来对齐外观的 MUI 类名**（`MuiMenuItem-root` 等，见 §1.3）。
-7. 编辑器菜单容器 class `editor-menu-scroll-container` / `editor-command-item`。
+7. 列表菜单根节点 `#context-menu-note-list`，菜单项 class `menu-item` / `menu-text`，以及**复用来对齐外观的 MUI 类名**（`MuiMenuItem-root` 等，见 §1.3）。
+8. 编辑器菜单容器 class `editor-menu-scroll-container` / `editor-command-item`。
 
 `src/export/comments.ts`、`src/export/note-content.ts` 与 `src/export/outline.ts`（只**读** doc JSON 与笔记 HTML 的结构，不改也不写）：
 
-8. 协作笔记 doc JSON 的块结构：评论锚点 `text[].attributes['comment-<id>con']` 与 `comments` 表（见 §3.3）；上传的文件是 `type: 'embed'` 块，靠 `embedType` / `embedData.src` / `embedData.fileName` 识别（见 §4.4）。
-9. 大纲笔记的 HTML 结构：`body[data-wiz-document-type="outline"]` + `.outline-container` / `.node` / `.row` / `.content` / `.child.children`；以及 `LiveEditor.escapeMarkdownText`（见 §9.2）。
+9. 协作笔记 doc JSON 的块结构：评论锚点 `text[].attributes['comment-<id>con']` 与 `comments` 表（见 §3.3）；上传的文件是 `type: 'embed'` 块，靠 `embedType` / `embedData.src` / `embedData.fileName` 识别（见 §4.4）；双链是行内文本属性 `{ type: 'wiki-link', name, linkId }`，而 `doc2markdown` 把它序列化成 `[[name id=linkId]]`（见 §9.1）。
+10. 大纲笔记的 HTML 结构：`body[data-wiz-document-type="outline"]` + `.outline-container` / `.node` / `.row` / `.content` / `.child.children`；以及 `LiveEditor.escapeMarkdownText`（见 §9.2）。
 
 ---
 

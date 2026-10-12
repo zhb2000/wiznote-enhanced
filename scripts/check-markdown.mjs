@@ -21,13 +21,18 @@
  * 无扩展名的相对导入）。**别给它加 import**，否则这个脚本会挂。
  */
 import {
+  encodeMarkdownPath,
   encodePathSegment,
+  escapeLinkText,
   linkTargetParts,
+  renderMarkdownLink,
+  renderWikiLink,
   replaceInlineLinks,
   rewriteImageTargets,
   splitImageTargets,
   splitImageTitle,
   unescapeMarkdown,
+  wikilinkConflict,
 } from '../src/export/markdown-inline.ts';
 
 let checks = 0;
@@ -298,6 +303,44 @@ expectRewrite(
     '`\\[TOC\\]` 与 `\\*\\*粗体\\*\\*` 还原',
     unescapeMarkdown('\\[TOC\\] \\*\\*粗体\\*\\*') === '[TOC] **粗体**',
     JSON.stringify(unescapeMarkdown('\\[TOC\\] \\*\\*粗体\\*\\*')),
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. 笔记链接（内链 / 双链）→ wikilink / markdown 链接                 */
+/* ------------------------------------------------------------------ */
+
+{
+  // wikilink 名字里哪些字符“表达不了”。依据是 Obsidian 官方帮助文档的清单
+  // （`# | ^ : %% [[ ]]`）**减去**被 naming.ts 提前换成空格的 `|` `/` `\` `:` 等。
+  expect('冲突字符：干净名字没有', wikilinkConflict('示例笔记') === undefined, wikilinkConflict('示例笔记'));
+  expect('冲突字符：`[` `]`（剪藏式标题）', wikilinkConflict('[草稿]待办') === '[', wikilinkConflict('[草稿]待办'));
+  expect('冲突字符：`#`（锚点分隔符）', wikilinkConflict('a#b') === '#', wikilinkConflict('a#b'));
+  expect('冲突字符：`^`（块引用分隔符）', wikilinkConflict('a^b') === '^', wikilinkConflict('a^b'));
+  expect('冲突字符：`%%`（注释语法）', wikilinkConflict('完成度 100%%') === '%%', wikilinkConflict('完成度 100%%'));
+  expect('冲突字符：单 `%` 不算（`100%` 很常见）', wikilinkConflict('完成度 100%') === undefined, wikilinkConflict('完成度 100%'));
+  // `|` `/` 这些在落盘名里根本不可能出现（convertToValidFilename 会换成空格），别把它们算成冲突
+  expect('冲突字符：`|` 不算（早被换成空格）', wikilinkConflict('a|b') === undefined, wikilinkConflict('a|b'));
+
+  expect('wikilink：不带 .md 后缀', renderWikiLink('示例笔记') === '[[示例笔记]]', renderWikiLink('示例笔记'));
+
+  // 显示文本里的 `]` 会提前结束 `[...]`，`\` 会吃掉下一个字符
+  expect('显示文本：`]` `[` `\\` 转义', escapeLinkText('[草稿]待办 a\\b') === '\\[草稿\\]待办 a\\\\b', escapeLinkText('[草稿]待办 a\\b'));
+
+  const enc = (p) => encodeMarkdownPath(p);
+  expect('链接目标：保留 `/` 并逐段编码', enc('../示例笔记/示例笔记.md') === '../%E7%A4%BA%E4%BE%8B%E7%AC%94%E8%AE%B0/%E7%A4%BA%E4%BE%8B%E7%AC%94%E8%AE%B0.md', enc('../示例笔记/示例笔记.md'));
+  expect('链接目标：空格 → %20', enc('a b.md') === 'a%20b.md', enc('a b.md'));
+  expect('链接目标：`#` → %23（否则成了 fragment）', enc('a#b.md') === 'a%23b.md', enc('a#b.md'));
+  expect('链接目标：`^` → %5E', enc('a^b.md') === 'a%5Eb.md', enc('a^b.md'));
+  expect('链接目标：`[` `]` → %5B %5D', enc('[草稿]待办.md') === '%5B%E8%8D%89%E7%A8%BF%5D%E5%BE%85%E5%8A%9E.md', enc('[草稿]待办.md'));
+  expect('链接目标：`%%` → %25%25', enc('100%%.md') === '100%25%25.md', enc('100%%.md'));
+  expect('链接目标：`(` `)` 与单引号也要编（裸目标里会破坏括号配对）', enc("x(2)'y.md") === 'x%282%29%27y.md', enc("x(2)'y.md"));
+
+  expect(
+    '渲染：冲突名字 + 同批次的相对路径 → 标准 markdown 链接',
+    renderMarkdownLink('[草稿]待办', '../[草稿]待办/[草稿]待办.md') ===
+      '[\\[草稿\\]待办](../%5B%E8%8D%89%E7%A8%BF%5D%E5%BE%85%E5%8A%9E/%5B%E8%8D%89%E7%A8%BF%5D%E5%BE%85%E5%8A%9E.md)',
+    renderMarkdownLink('[草稿]待办', '../[草稿]待办/[草稿]待办.md'),
   );
 }
 

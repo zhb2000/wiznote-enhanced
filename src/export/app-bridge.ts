@@ -1382,6 +1382,49 @@ export async function readNoteTags(note: NoteRef): Promise<string | undefined> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 笔记标题索引（内链 / 双链 → wikilink 用）                            */
+/* ------------------------------------------------------------------ */
+
+const noteTitleCache = new Map<string, Map<string, string>>();
+
+/**
+ * `docGuid`（小写）→ 这篇笔记**当前**的标题。
+ *
+ * 改写成 wikilink 时（正文里的笔记内链 `wiz://open_document?guid=…`、协作笔记的
+ * 双链 `[[名称 id=guid]]`）**必须用目标笔记当前的名字**，不能用链接里自带的那份快照：
+ * 实测（2026-10-12）抽查里就有快照已经和目标当前标题对不上的双链 ——
+ * 目标改名之后，链接里存的 `name` 不会跟着变。而 wikilink 是按名字匹配的，
+ * 名字错一个字符就是一条悬空链接。
+ *
+ * 数据就在本地主库的 `docs` 表里（主键 `[kbGuid, docGuid]`，行上有 `title`），
+ * 零网络零猜测。与 `resolveTagPaths()` 同一套路：整表读一次、按知识库缓存 ——
+ * 批量导出几千篇不会重复读（每篇笔记只在首次遇到链接时查一次）。
+ *
+ * 查不到（目标不在本地、或在别的知识库）时**返回的表里就没有这一项**，
+ * 调用方据此退回链接自带的名字。
+ */
+export async function resolveNoteTitles(kbGuid: string): Promise<Map<string, string>> {
+  const cached = noteTitleCache.get(kbGuid);
+  if (cached) return cached;
+
+  const titles = new Map<string, string>();
+  for (const name of await accountDbNames()) {
+    const db = await openDb(name);
+    if (!db) continue;
+    for (const row of await readAllRecords(db, 'docs')) {
+      if (row.kbGuid !== kbGuid) continue;
+      const docGuid = typeof row.docGuid === 'string' ? row.docGuid.toLowerCase() : '';
+      const title = typeof row.title === 'string' ? row.title : '';
+      if (docGuid && title) titles.set(docGuid, title);
+    }
+  }
+
+  log.debug('笔记标题表已加载', { kbGuid, titles: titles.size });
+  noteTitleCache.set(kbGuid, titles);
+  return titles;
+}
+
+/* ------------------------------------------------------------------ */
 /* 本地内容存在性检查                                                  */
 /* ------------------------------------------------------------------ */
 

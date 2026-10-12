@@ -4,8 +4,15 @@ import { createYielder } from '../utils/yield';
 import { fetchAttachment, fetchNoteAttachment, fetchResource } from './app-bridge';
 import { buildZip, bytesToBlob, mimeOf, type ZipProgress } from './archive';
 import { createNameAllocator, toDiskName } from './naming';
-import { renderNote } from './note-content';
-import type { ArchiveEntry, ExportOptions, ExportProgress, NoteExportResult, NoteRef } from './types';
+import { noteBaseName, renderNote } from './note-content';
+import type {
+  ArchiveEntry,
+  BatchPathIndex,
+  ExportOptions,
+  ExportProgress,
+  NoteExportResult,
+  NoteRef,
+} from './types';
 
 const log = logger('export');
 
@@ -109,6 +116,32 @@ export async function exportNotes(
    */
   const breathe = createYielder();
 
+  /**
+   * 本次批次里每篇笔记的**产物落点**：`docGuid`（小写）→ `{ path, name }`。
+   *
+   * 两件事都要在渲染**之前**定下来：
+   * 1. 目录名的 ` (N)` 消歧（同标题的笔记靠文件夹区分，正文名恒等于标题）；
+   * 2. 正文里的笔记链接改写成 wikilink 时，名字含 `[` `]` `#` `^` `%%` 的那几条要退化成
+   *    标准 markdown 链接 —— 那需要知道目标的相对路径，而只有**同批次**的笔记才说得出
+   *    （见 `note-content.ts` 的 `rewriteInternalLinks()`）。
+   *
+   * 所以这里**预分配**（顺序与后面的循环完全一致），循环里不再分配、直接用这里的结论。
+   * 副作用是“失败 / 被跳过的那一篇”也会占着名字 —— 这是刻意的：落点只由标题与顺序决定，
+   * 与渲染成败无关，同一批的目录名才不会一会儿一个样。
+   */
+  const batchPaths: BatchPathIndex = new Map();
+  for (const note of notes) {
+    const name = noteBaseName(note);
+    // 目录名要按“目录”规则消歧（`v1.0` → `v1.0 (2)`，而不是 `v1 (2).0`）；
+    // 后缀必须落在斜杠**之前**，所以先分配不带斜杠的目录名，再拼 `/`。
+    const dirName = grouped ? archiveNames.allocate(name, { kind: 'dir' }) : '';
+    const path = `${dirName ? `${dirName}/` : ''}${name}.md`;
+    // 正文文件名恒等于笔记标题，只登记占位、不参与改名（消歧只落在文件夹上）。
+    invariant(archiveNames.reserve(path), '笔记路径重复，zip 内会互相覆盖', { path });
+    batchPaths.set(note.docGuid.toLowerCase(), { path, name });
+  }
+  await breathe();
+
   for (const [index, note] of notes.entries()) {
     if (hooks.signal?.aborted) {
       cancelled = true;
@@ -120,7 +153,8 @@ export async function exportNotes(
 
     let outcome;
     try {
-      outcome = await renderNote(note, options, hooks.signal);
+      // 批次落点要交给渲染：正文里的笔记链接靠它才能在名字冲突时退化成标准 markdown 链接
+      outcome = await renderNote(note, options, hooks.signal, batchPaths);
     } catch (error) {
       // 中止不是失败：这一篇还什么都没落进产物，整个作废（由 applyOutcome 记成“未处理”）
       if (hooks.signal?.aborted) {
@@ -145,16 +179,14 @@ export async function exportNotes(
     }
 
     const { data } = outcome;
-    // 目录名要按“目录”规则消歧（`v1.0` → `v1.0 (2)`，而不是 `v1 (2).0`）。
-    // 后缀也必须落在斜杠**之前**，所以先分配不带斜杠的目录名，再拼 `/`。
-    const noteDirName = grouped
-      ? archiveNames.allocate(toDiskName(data.fileName.replace(/\.[^.]+$/, ''), '未命名笔记'), { kind: 'dir' })
-      : '';
-    const noteDir = noteDirName ? `${noteDirName}/` : '';
+    // 落点上面已经预分配并登记过了，这里只是取回来用（含目录名与 ` (2)` 消歧的结果）
+    const product = batchPaths.get(note.docGuid.toLowerCase());
+    invariant(product !== undefined, '笔记落点没有预分配', { docGuid: note.docGuid });
+    const bodyPath = product?.path ?? `${noteBaseName(note)}.md`;
+    // 名字里不可能有 `/`（naming.ts 的清洗会把它换成空格），所以最后一个斜杠就是目录边界
+    const slash = bodyPath.lastIndexOf('/');
+    const noteDir = slash < 0 ? '' : bodyPath.slice(0, slash + 1);
 
-    // 正文文件名恒等于笔记标题，只登记占位、不参与改名（消歧只落在文件夹上）。
-    const bodyPath = `${noteDir}${data.fileName}`;
-    invariant(archiveNames.reserve(bodyPath), '笔记路径重复，zip 内会互相覆盖', { path: bodyPath });
     // 正文编码成字节也是**整篇一遍**（几十 MB 的剪藏要十几毫秒），和篇内那几趟改写一样
     // 放在让出点两侧：上一段（格式转换）刚干完，正好在这里把那一帧还回去
     await breathe();
